@@ -1,0 +1,147 @@
+const SCHEMA="CREATE TABLE IF NOT EXISTS matches (id SERIAL PRIMARY KEY, stage TEXT NOT NULL, home TEXT NOT NULL, away TEXT NOT NULL, cutoff BIGINT NOT NULL, result TEXT);\n\nCREATE TABLE IF NOT EXISTS players (id SERIAL PRIMARY KEY, name TEXT NOT NULL, token TEXT NOT NULL UNIQUE);\n\nCREATE TABLE IF NOT EXISTS picks (player INTEGER NOT NULL REFERENCES players(id), match_id INTEGER NOT NULL REFERENCES matches(id), pick TEXT NOT NULL CHECK(pick IN ('L','E','V')), PRIMARY KEY(player,match_id));\n";
+const stages = ['Cuartos · Ida','Cuartos · Vuelta','Semifinal · Ida','Semifinal · Vuelta','Final · Ida','Final · Vuelta'];
+const options = {L:'Local', E:'Empate', V:'Visita'};
+const valid = value => Object.hasOwn(options, value);
+const hash = async value => Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256',new TextEncoder().encode(value))), x=>x.toString(16).padStart(2,'0')).join('');
+const send = (data,status=200) => Response.json(data,{status,headers:{'Cache-Control':'no-store'}});
+function page(admin) {
+ return `<!doctype html><html lang="es"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Quiniela Liguilla MX</title><style>
+ body{margin:0;background:#f1f5f2;color:#13251e;font:16px system-ui}header{background:#10392c;color:white;padding:24px}main,header div{max-width:760px;margin:auto}main{padding:16px}section{background:white;padding:18px;border-radius:14px;margin-bottom:14px}h1,h2{margin-top:0}label{display:block;margin:10px 0}input,select,button{font:inherit;padding:9px;border:1px solid #adbdb5;border-radius:7px;max-width:100%;box-sizing:border-box}button{background:#14553d;color:white;cursor:pointer;margin:5px 0}li{padding:6px 0}.match{border-top:1px solid #ccd8d1;padding:12px 0}p{line-height:1.45}#message{font-weight:bold}small{display:block}
+ </style><header><div><h1>Quiniela Liguilla MX</h1>${admin?'Panel de administrador':'Pronósticos · Local, Empate o Visita'}</div></header><main>
+ ${admin?`<section><h2>Publicar partido</h2><form id="publish"><label>Contraseña de administrador <input id="secret" type="password" required></label><label>Etapa <select name="stage">${stages.map(s=>'<option>'+s+'</option>').join('')}</select></label><label>Local <input name="home" maxlength="65" required></label><label>Visitante <input name="away" maxlength="65" required></label><label>Fecha y hora del partido (Zacatecas) <input type="datetime-local" name="kickoff" required></label><button>Publicar partido</button></form></section>`:`<section><h2>Mi participación</h2><form id="register"><label>Nombre o apodo <input name="name" minlength="2" maxlength="60" required></label><button>Registrarme</button></form><label>Código de participante <input id="code" autocomplete="off"></label><small>Guarda tu código para volver desde otro celular.</small></section>`}
+ <p id="message" role="status"></p><section><h2>Partidos y resultados</h2><div id="matches"></div></section><section><h2>Tabla general</h2><ol id="ranking"></ol></section></main>
+ <script>
+ const admin=${admin}, opts=${JSON.stringify(options)};
+ const byId=id=>document.getElementById(id);
+ const report=text=>byId('message').textContent=text;
+ async function api(path,data){
+  const response=await fetch('/api/'+path,data?{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(data)}:{cache:'no-store'});
+  const result=await response.json();
+  if(!response.ok)throw Error(result.error);
+  return result;
+ }
+ function run(action){return async event=>{event.preventDefault();try{await action(event)}catch(error){report(error.message)}}}
+ if(admin){
+  byId('publish').onsubmit=run(async e=>{
+   const fields=Object.fromEntries(new FormData(e.currentTarget));
+   await api('match',{...fields,secret:byId('secret').value});report('Partido publicado');await load();
+  });
+ }else{
+  byId('code').value=localStorage.getItem('quiniela-code')||'';
+  byId('register').onsubmit=run(async e=>{
+   const player=await api('register',Object.fromEntries(new FormData(e.currentTarget)));
+   byId('code').value=player.code;localStorage.setItem('quiniela-code',player.code);
+   report('Tu código es '+player.code+'. Guárdalo para volver.');
+  });
+ }
+ async function load(){
+  const data=await api('state');
+  byId('matches').replaceChildren();
+  if(!data.matches.length)byId('matches').textContent='Todavía no hay partidos publicados.';
+  for(const match of data.matches){
+   const form=document.createElement('form');form.className='match';
+   const title=document.createElement('strong');title.textContent=match.home+' vs. '+match.away;
+   const meta=document.createElement('p');
+   meta.textContent=match.stage+' · Cierre '+new Date(match.cutoff).toLocaleString('es-MX',{timeZone:'America/Mexico_City'})+' · '+(opts[match.result]||'Resultado pendiente');
+   form.append(title,meta);
+   if(admin||(!match.result&&Date.now()<match.cutoff)){
+    const select=document.createElement('select');select.setAttribute('aria-label',admin?'Resultado oficial':'Pronóstico');
+    for(const [value,label] of Object.entries(opts))select.add(new Option(label,value));
+    if(match.result)select.value=match.result;
+    const button=document.createElement('button');button.textContent=admin?'Guardar resultado':'Enviar pronóstico';
+    form.append(select,' ',button);
+    form.onsubmit=run(async ()=>{
+     if(admin){await api('result',{id:match.id,result:select.value,secret:byId('secret').value});report('Resultado guardado');await load();}
+     else{const code=byId('code').value.trim();await api('pick',{id:match.id,pick:select.value,code});localStorage.setItem('quiniela-code',code);report('Pronóstico de '+match.home+' vs. '+match.away+' guardado: '+opts[select.value]+'.');}
+    });
+   }
+   byId('matches').append(form);
+  }
+  byId('ranking').replaceChildren(...data.ranking.map(p=>{const li=document.createElement('li');li.textContent=p.name+' · '+p.points+' pts';return li}));
+ }
+ load().catch(error=>report(error.message));
+ </script></html>`;
+}
+const worker = {async fetch(request,env){
+ const path=new URL(request.url).pathname.replace(/\/$/,'')||'/';
+ if(request.method==='GET'&&['/','/admin','/participantes'].includes(path)){
+  return new Response(page(path==='/admin'),{headers:{'Content-Type':'text/html; charset=utf-8','Cache-Control':'no-store'}});
+ }
+ try{
+  const db=env.DB;
+  if(request.method==='GET'&&path==='/api/state'){
+   const [matches,ranking]=await db.batch([
+    db.prepare('SELECT * FROM matches ORDER BY cutoff,id'),
+    db.prepare('SELECT players.name, SUM(CASE WHEN picks.pick=matches.result THEN 1 ELSE 0 END) AS points FROM players JOIN picks ON players.id=picks.player JOIN matches ON matches.id=picks.match_id GROUP BY players.id ORDER BY points DESC,players.name')
+   ]);
+   return send({matches:matches.results,ranking:ranking.results});
+  }
+  if(request.method!=='POST'||!['/api/match','/api/result','/api/register','/api/pick'].includes(path))return send({error:'Ruta inexistente.'},404);
+  if(Number(request.headers.get('content-length'))>4096)return send({error:'Solicitud demasiado grande.'},413);
+  const raw=await request.text();
+  if(raw.length>4096)return send({error:'Solicitud demasiado grande.'},413);
+  let data;
+  try{data=JSON.parse(raw)}catch{return send({error:'Solicitud inválida.'},400)}
+  if(!data||typeof data!=='object')return send({error:'Solicitud inválida.'},400);
+  if(path==='/api/match'||path==='/api/result'){
+   if(!env.ADMIN_PASSWORD||typeof data.secret!=='string'||(await hash(data.secret))!==(await hash(env.ADMIN_PASSWORD)))return send({error:'Contraseña de administrador incorrecta.'},401);
+  }
+  if(path==='/api/match'){
+   const home=String(data.home||'').trim(),away=String(data.away||'').trim();
+   const kickoff=typeof data.kickoff==='string'&&/^\d{4}-\d\d-\d\dT\d\d:\d\d$/.test(data.kickoff)?Date.parse(data.kickoff+'-06:00'):NaN;
+   if(!home||!away||home.toLowerCase()===away.toLowerCase()||home.length>65||away.length>65||!stages.includes(data.stage)||!Number.isFinite(kickoff))return send({error:'Revisa etapa, equipos y horario.'},400);
+   await db.prepare('INSERT INTO matches(stage,home,away,cutoff) VALUES (?,?,?,?)').bind(data.stage,home,away,kickoff-600000).run();
+   return send({ok:true});
+  }
+  if(path==='/api/result'){
+   if(!Number.isSafeInteger(data.id)||!valid(data.result))return send({error:'Resultado inválido.'},400);
+   const result=await db.prepare('UPDATE matches SET result=? WHERE id=?').bind(data.result,data.id).run();
+   return result.meta.changes?send({ok:true}):send({error:'Partido inexistente.'},404);
+  }
+  if(path==='/api/register'){
+   const name=typeof data.name==='string'?data.name.trim().replace(/\s+/g,' '):'';
+   if(name.length<2||name.length>60)return send({error:'Escribe un nombre de 2 a 60 caracteres.'},400);
+   const code=crypto.randomUUID().replaceAll('-','').toUpperCase();
+   await db.prepare('INSERT INTO players(name,token) VALUES (?,?)').bind(name,await hash(code)).run();
+   return send({code});
+  }
+  if(!Number.isSafeInteger(data.id)||!valid(data.pick)||typeof data.code!=='string'||!/^[0-9a-f]{32}$/i.test(data.code))return send({error:'Revisa tu código y tu pronóstico.'},400);
+  const player=await db.prepare('SELECT id FROM players WHERE token=?').bind(await hash(data.code.toUpperCase())).first();
+  if(!player)return send({error:'Código incorrecto.'},401);
+  const result=await db.prepare('INSERT INTO picks(player,match_id,pick) SELECT ?,id,? FROM matches WHERE id=? AND cutoff>? AND result IS NULL ON CONFLICT(player,match_id) DO UPDATE SET pick=excluded.pick').bind(player.id,data.pick,data.id,Date.now()).run();
+  return result.meta.changes?send({ok:true}):send({error:'El partido no existe o ya cerró.'},409);
+ }catch(error){console.error(error.message);return send({error:'Ocurrió un error. Intenta de nuevo.'},500)}
+}};
+
+import http from 'node:http';
+import pg from 'pg';
+if (!process.env.DATABASE_URL || !process.env.ADMIN_PASSWORD) throw Error('Missing runtime configuration');
+pg.types.setTypeParser(20, Number);
+const pool = new pg.Pool({connectionString:process.env.DATABASE_URL,max:4});
+await pool.query(SCHEMA);
+const DB = {
+ prepare(statement) {
+  let count=0;
+  const query=statement.replace(/\?/g,()=>'$'+(++count));
+  const bind=(...params)=>({
+   async run(){const result=await pool.query(query,params);return {meta:{changes:result.rowCount}};},
+   async first(){return (await pool.query(query,params)).rows[0];},
+   async all(){return {results:(await pool.query(query,params)).rows};}
+  });
+  return {...bind(),bind};
+ },
+ batch(items){return Promise.all(items.map(item=>item.all()));}
+};
+http.createServer(async (req,res)=>{
+ try{
+  const method=req.method;
+  let body;
+  if(method==='POST'){
+   const chunks=[];let total=0;
+   for await(const chunk of req){total+=chunk.length;if(total>4096){res.writeHead(413);res.end();return;}chunks.push(chunk);}
+   body=Buffer.concat(chunks);
+  }
+  const response=await worker.fetch(new Request(new URL(req.url,'http://localhost'),{method,headers:req.headers,body}),{DB,ADMIN_PASSWORD:process.env.ADMIN_PASSWORD});
+  res.writeHead(response.status,Object.fromEntries(response.headers));res.end(Buffer.from(await response.arrayBuffer()));
+ }catch(error){console.error(error.message);res.writeHead(500);res.end();}
+}).listen(Number(process.env.PORT||10000),'0.0.0.0');
