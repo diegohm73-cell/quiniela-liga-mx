@@ -8,7 +8,7 @@ function page(admin) {
  return `<!doctype html><html lang="es"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Quiniela Liguilla MX</title><style>
  body{margin:0;background:#f1f5f2;color:#13251e;font:16px system-ui}header{background:#10392c;color:white;padding:24px}main,header div{max-width:760px;margin:auto}main{padding:16px}section{background:white;padding:18px;border-radius:14px;margin-bottom:14px}h1,h2{margin-top:0}label{display:block;margin:10px 0}input,select,button{font:inherit;padding:9px;border:1px solid #adbdb5;border-radius:7px;max-width:100%;box-sizing:border-box}button{background:#14553d;color:white;cursor:pointer;margin:5px 0}li{padding:6px 0}.match{border-top:1px solid #ccd8d1;padding:12px 0}p{line-height:1.45}#message{font-weight:bold}small{display:block}
  </style><header><div><h1>Quiniela Liguilla MX</h1>${admin?'Panel de administrador':'Pronósticos · Local, Empate o Visita'}</div></header><main>
- ${admin?`<section><h2>Publicar partido</h2><form id="publish"><label>Contraseña de administrador <input id="secret" type="password" required></label><label>Etapa <select name="stage">${stages.map(s=>'<option>'+s+'</option>').join('')}</select></label><label>Local <input name="home" maxlength="65" required></label><label>Visitante <input name="away" maxlength="65" required></label><label>Fecha y hora del partido (Zacatecas) <input type="datetime-local" name="kickoff" required></label><button>Publicar partido</button></form></section>`:`<section><h2>Mi participación</h2><form id="register"><label>Nombre o apodo <input name="name" minlength="2" maxlength="60" required></label><button>Registrarme</button></form><label>Código de participante <input id="code" autocomplete="off"></label><small>Guarda tu código para volver desde otro celular.</small></section>`}
+ ${admin?`<section><h2>Administración</h2><label>Contraseña de administrador <input id="secret" type="password" autocomplete="current-password"></label><form id="register"><label>Nombre del participante <input name="name" minlength="2" maxlength="60" required></label><button>Generar código</button><output id="issued" aria-live="polite"></output></form></section><section><h2>Publicar partido</h2><form id="publish"><label>Etapa <select name="stage">${stages.map(s=>'<option>'+s+'</option>').join('')}</select></label><label>Local <input name="home" maxlength="65" required></label><label>Visitante <input name="away" maxlength="65" required></label><label>Fecha y hora del partido (Zacatecas) <input type="datetime-local" name="kickoff" required></label><button>Publicar partido</button></form></section>`:`<section><h2>Mi participación</h2><label>Código de participante <input id="code" autocomplete="off"></label><small>Usa el código que te dio el organizador. Puedes actualizar tu boleta hasta el cierre de la ronda.</small></section>`}
  <p id="message" role="status"></p><section><h2>Partidos y resultados</h2><div id="matches"></div></section><section><h2>Tabla general</h2><ol id="ranking"></ol></section></main>
  <script>
  const admin=${admin}, opts=${JSON.stringify(options)};
@@ -22,40 +22,72 @@ function page(admin) {
  }
  function run(action){return async event=>{event.preventDefault();try{await action(event)}catch(error){report(error.message)}}}
  if(admin){
+  byId('register').onsubmit=run(async e=>{
+   byId('issued').textContent='';
+   const player=await api('register',{...Object.fromEntries(new FormData(e.currentTarget)),secret:byId('secret').value});
+   byId('issued').textContent=' Código para '+player.name+': '+player.code;
+   e.target.reset();
+  });
   byId('publish').onsubmit=run(async e=>{
    const fields=Object.fromEntries(new FormData(e.currentTarget));
    await api('match',{...fields,secret:byId('secret').value});report('Partido publicado');await load();
   });
  }else{
   byId('code').value=localStorage.getItem('quiniela-code')||'';
-  byId('register').onsubmit=run(async e=>{
-   const player=await api('register',Object.fromEntries(new FormData(e.currentTarget)));
-   byId('code').value=player.code;localStorage.setItem('quiniela-code',player.code);
-   report('Tu código es '+player.code+'. Guárdalo para volver.');
-  });
  }
  async function load(){
   const data=await api('state');
   byId('matches').replaceChildren();
   if(!data.matches.length)byId('matches').textContent='Todavía no hay partidos publicados.';
+  const rounds=new Map();
+  if(!admin){
+   for(const match of data.matches){
+    if(rounds.has(match.stage))continue;
+    const form=document.createElement('form');
+    const heading=document.createElement('h3');heading.textContent=match.stage;
+    form.append(heading);
+    rounds.set(match.stage,form);
+    byId('matches').append(form);
+    if(Date.now()<match.round_cutoff&&!match.round_closed){
+     const button=document.createElement('button');button.textContent='Guardar boleta';
+     form.onsubmit=run(async ()=>{
+      const code=byId('code').value.trim();
+      const picks=Object.fromEntries(new FormData(form));
+      await api('pick',{stage:match.stage,picks,code});
+      localStorage.setItem('quiniela-code',code);report('Boleta guardada para '+match.stage+'.');
+     });
+     form.append(button);
+    }
+   }
+  }
   for(const match of data.matches){
-   const form=document.createElement('form');form.className='match';
+   const form=document.createElement(admin?'form':'div');form.className='match';
    const title=document.createElement('strong');title.textContent=match.home+' vs. '+match.away;
    const meta=document.createElement('p');
-   meta.textContent=match.stage+' · Cierre '+new Date(match.cutoff).toLocaleString('es-MX',{timeZone:'America/Mexico_City'})+' · '+(opts[match.result]||'Resultado pendiente');
+   meta.textContent=match.stage+' · Cierre '+new Date(match.round_cutoff).toLocaleString('es-MX',{timeZone:'America/Mexico_City'})+' · '+(opts[match.result]||'Resultado pendiente');
    form.append(title,meta);
-   if(admin||(!match.result&&Date.now()<match.cutoff)){
+   if(admin||(!match.round_closed&&Date.now()<match.round_cutoff)){
     const select=document.createElement('select');select.setAttribute('aria-label',admin?'Resultado oficial':'Pronóstico');
+    if(!admin){
+     select.name=String(match.id);select.required=true;
+     select.add(new Option('Elige tu pronóstico',''));
+    }
     for(const [value,label] of Object.entries(opts))select.add(new Option(label,value));
     if(match.result)select.value=match.result;
-    const button=document.createElement('button');button.textContent=admin?'Guardar resultado':'Enviar pronóstico';
+    if(!admin){
+     form.append(select);
+    }else{
+    const button=document.createElement('button');button.textContent='Guardar resultado';
     form.append(select,' ',button);
     form.onsubmit=run(async ()=>{
-     if(admin){await api('result',{id:match.id,result:select.value,secret:byId('secret').value});report('Resultado guardado');await load();}
-     else{const code=byId('code').value.trim();await api('pick',{id:match.id,pick:select.value,code});localStorage.setItem('quiniela-code',code);report('Pronóstico de '+match.home+' vs. '+match.away+' guardado: '+opts[select.value]+'.');}
+     await api('result',{id:match.id,result:select.value,secret:byId('secret').value});report('Resultado guardado');await load();
     });
+    }
    }
-   byId('matches').append(form);
+   if(!admin){
+    const round=rounds.get(match.stage);
+    round.insertBefore(form,round.querySelector('button'));
+   }else byId('matches').append(form);
   }
   byId('ranking').replaceChildren(...data.ranking.map(p=>{const li=document.createElement('li');li.textContent=p.name+' · '+p.points+' pts';return li}));
  }
@@ -71,7 +103,7 @@ const worker = {async fetch(request,env){
   const db=env.DB;
   if(request.method==='GET'&&path==='/api/state'){
    const [matches,ranking]=await db.batch([
-    db.prepare('SELECT * FROM matches ORDER BY cutoff,id'),
+    db.prepare('SELECT *,MIN(cutoff) OVER (PARTITION BY stage) AS round_cutoff,BOOL_OR(result IS NOT NULL) OVER (PARTITION BY stage) AS round_closed FROM matches ORDER BY cutoff,id'),
     db.prepare('SELECT players.name, SUM(CASE WHEN picks.pick=matches.result THEN 1 ELSE 0 END) AS points FROM players JOIN picks ON players.id=picks.player JOIN matches ON matches.id=picks.match_id GROUP BY players.id ORDER BY points DESC,players.name')
    ]);
    return send({matches:matches.results,ranking:ranking.results});
@@ -83,7 +115,7 @@ const worker = {async fetch(request,env){
   let data;
   try{data=JSON.parse(raw)}catch{return send({error:'Solicitud inválida.'},400)}
   if(!data||typeof data!=='object')return send({error:'Solicitud inválida.'},400);
-  if(path==='/api/match'||path==='/api/result'){
+  if(path==='/api/match'||path==='/api/result'||path==='/api/register'){
    if(!env.ADMIN_PASSWORD||typeof data.secret!=='string'||(await hash(data.secret))!==(await hash(env.ADMIN_PASSWORD)))return send({error:'Contraseña de administrador incorrecta.'},401);
   }
   if(path==='/api/match'){
@@ -102,14 +134,28 @@ const worker = {async fetch(request,env){
    const name=typeof data.name==='string'?data.name.trim().replace(/\s+/g,' '):'';
    if(name.length<2||name.length>60)return send({error:'Escribe un nombre de 2 a 60 caracteres.'},400);
    const code=crypto.randomUUID().replaceAll('-','').toUpperCase();
-   await db.prepare('INSERT INTO players(name,token) VALUES (?,?)').bind(name,await hash(code)).run();
-   return send({code});
+   const key=name.toLowerCase();
+   const created=await db.prepare('INSERT INTO players(name,token,registration_key) SELECT ?,?,? WHERE NOT EXISTS (SELECT 1 FROM players WHERE lower(name)=?) ON CONFLICT (registration_key) DO NOTHING').bind(name,await hash(code),key,key).run();
+   if(!created.meta.changes)return send({error:'Ya existe un participante con ese nombre. Usa su código original o distingue los nombres completos.'},409);
+   return send({name,code});
   }
-  if(!Number.isSafeInteger(data.id)||!valid(data.pick)||typeof data.code!=='string'||!/^[0-9a-f]{32}$/i.test(data.code))return send({error:'Revisa tu código y tu pronóstico.'},400);
+  if(!stages.includes(data.stage)||!data.picks||typeof data.picks!=='object'||Array.isArray(data.picks)||typeof data.code!=='string'||!/^[0-9a-f]{32}$/i.test(data.code))return send({error:'Revisa tu código y tus pronósticos.'},400);
+  const picks=Object.entries(data.picks);
+  if(!picks.length||picks.some(([id,pick])=>!/^\d+$/.test(id)||!valid(pick)))return send({error:'Completa todos los pronósticos de la ronda.'},400);
   const player=await db.prepare('SELECT id FROM players WHERE token=?').bind(await hash(data.code.toUpperCase())).first();
   if(!player)return send({error:'Código incorrecto.'},401);
-  const result=await db.prepare('INSERT INTO picks(player,match_id,pick) SELECT ?,id,? FROM matches WHERE id=? AND cutoff>? AND result IS NULL ON CONFLICT(player,match_id) DO UPDATE SET pick=excluded.pick').bind(player.id,data.pick,data.id,Date.now()).run();
-  return result.meta.changes?send({ok:true}):send({error:'El partido no existe o ya cerró.'},409);
+  const result=await db.prepare(`
+   WITH round_matches AS (SELECT id,cutoff,result FROM matches WHERE stage=?),
+   submitted AS (SELECT key::integer AS id,value AS pick FROM jsonb_each_text(?::jsonb))
+   INSERT INTO picks(player,match_id,pick)
+   SELECT ?,m.id,s.pick FROM round_matches m JOIN submitted s ON s.id=m.id
+   WHERE (SELECT COUNT(*) FROM round_matches)=(SELECT COUNT(*) FROM submitted)
+     AND (SELECT COUNT(*) FROM round_matches)=(SELECT COUNT(*) FROM round_matches JOIN submitted USING(id))
+     AND (SELECT MIN(cutoff) FROM round_matches)>EXTRACT(EPOCH FROM clock_timestamp())*1000
+     AND NOT EXISTS(SELECT 1 FROM round_matches WHERE result IS NOT NULL)
+   ON CONFLICT(player,match_id) DO UPDATE SET pick=excluded.pick
+  `).bind(data.stage,JSON.stringify(data.picks),player.id).run();
+  return result.meta.changes===picks.length?send({ok:true}):send({error:'La ronda cerró o cambió la lista de partidos. Actualiza la página.'},409);
  }catch(error){console.error(error.message);return send({error:'Ocurrió un error. Intenta de nuevo.'},500)}
 }};
 
@@ -119,6 +165,8 @@ if (!process.env.DATABASE_URL || !process.env.ADMIN_PASSWORD) throw Error('Missi
 pg.types.setTypeParser(20, Number);
 const pool = new pg.Pool({connectionString:process.env.DATABASE_URL,max:4});
 await pool.query(SCHEMA);
+await pool.query('ALTER TABLE players ADD COLUMN IF NOT EXISTS registration_key TEXT');
+await pool.query('CREATE UNIQUE INDEX IF NOT EXISTS players_registration_key ON players(registration_key)');
 const DB = {
  prepare(statement) {
   let count=0;
