@@ -7,8 +7,9 @@ const send = (data,status=200) => Response.json(data,{status,headers:{'Cache-Con
 function page(admin) {
  return `<!doctype html><html lang="es"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Quiniela Liguilla MX</title><style>
  body{margin:0;background:#f1f5f2;color:#13251e;font:16px system-ui}header{background:#10392c;color:white;padding:24px}main,header div{max-width:760px;margin:auto}main{padding:16px}section{background:white;padding:18px;border-radius:14px;margin-bottom:14px}h1,h2{margin-top:0}label{display:block;margin:10px 0}input,select,button{font:inherit;padding:9px;border:1px solid #adbdb5;border-radius:7px;max-width:100%;box-sizing:border-box}button{background:#14553d;color:white;cursor:pointer;margin:5px 0}li{padding:6px 0}.match{border-top:1px solid #ccd8d1;padding:12px 0}p{line-height:1.45}#message{font-weight:bold}small{display:block}
+ .picks-scroll{overflow-x:auto}.picks-table{width:100%;border-collapse:collapse;text-align:center}.picks-table th,.picks-table td{padding:10px;border:1px solid #ccd8d1;min-width:76px}.picks-table thead{background:#10392c;color:white}.picks-table tbody th{text-align:left;background:white;position:sticky;left:0}.picks-correct{background:#def3e5;font-weight:bold}.picks-table small{margin-top:4px}
  </style><header><div><h1>Quiniela Liguilla MX</h1>${admin?'Panel de administrador':'Pronósticos · Local, Empate o Visita'}</div></header><main>
- ${admin?`<section><h2>Administración</h2><label>Contraseña de administrador <input id="secret" type="password" autocomplete="current-password"></label><form id="register"><label>Nombre del participante <input name="name" minlength="2" maxlength="60" required></label><button>Generar código</button><output id="issued" aria-live="polite"></output></form></section><section><h2>Publicar partido</h2><form id="publish"><label>Etapa <select name="stage">${stages.map(s=>'<option>'+s+'</option>').join('')}</select></label><label>Local <input name="home" maxlength="65" required></label><label>Visitante <input name="away" maxlength="65" required></label><label>Fecha y hora del partido (Zacatecas) <input type="datetime-local" name="kickoff" required></label><button id="save-match">Publicar partido</button> <button type="button" id="cancel-edit" hidden>Cancelar edición</button></form></section><section><h2>Participantes y pronósticos</h2><button type="button" id="view-players">Consultar participantes</button><div id="players"></div></section>`:`<section><h2>Mi participación</h2><label>Código de participante <input id="code" autocomplete="off"></label><small>Usa el código que te dio el organizador. Puedes actualizar tu boleta hasta el cierre de la ronda.</small></section>`}
+ ${admin?`<section><h2>Administración</h2><label>Contraseña de administrador <input id="secret" type="password" autocomplete="current-password"></label><form id="register"><label>Nombre del participante <input name="name" minlength="2" maxlength="60" required></label><button>Generar código</button><output id="issued" aria-live="polite"></output></form></section><section><h2>Publicar partido</h2><form id="publish"><label>Etapa <select name="stage">${stages.map(s=>'<option>'+s+'</option>').join('')}</select></label><label>Local <input name="home" maxlength="65" required></label><label>Visitante <input name="away" maxlength="65" required></label><label>Fecha y hora del partido (Zacatecas) <input type="datetime-local" name="kickoff" required></label><button id="save-match">Publicar partido</button> <button type="button" id="cancel-edit" hidden>Cancelar edición</button></form></section><section><h2>Todos los pronósticos</h2><button type="button" id="view-players">Mostrar tabla de pronósticos</button><div id="players"></div></section>`:`<section><h2>Mi participación</h2><label>Código de participante <input id="code" autocomplete="off"></label><small>Usa el código que te dio el organizador. Puedes actualizar tu boleta hasta el cierre de la ronda.</small></section>`}
  <p id="message" role="status"></p><section><h2>Partidos y resultados</h2><div id="matches"></div></section><section><h2>Tabla general</h2><ol id="ranking"></ol></section></main>
  <script>
  const admin=${admin}, opts=${JSON.stringify(options)};
@@ -38,22 +39,67 @@ function page(admin) {
    if(secret()!==password)return;
    const list=byId('players');
    list.replaceChildren();
-   if(!data.players.length)list.textContent='Todavía no hay participantes registrados.';
-   for(const player of data.players){
-    const details=document.createElement('details');
-    const summary=document.createElement('summary');
-    summary.textContent=player.name+' · '+player.picks.length+' pronósticos';
-    details.append(summary);
-    const entries=document.createElement('ul');
-    for(const pick of player.picks){
-     const item=document.createElement('li');
-     item.textContent=pick.stage+' · '+pick.home+' vs. '+pick.away+' · '+opts[pick.pick];
-     entries.append(item);
-    }
-    details.append(entries);
-    if(!player.picks.length)entries.textContent='Sin pronósticos enviados.';
-    list.append(details);
+   if(!data.matches.length){
+    list.textContent='Todavía no hay partidos publicados.';
+    return;
    }
+   const rounds=[...new Set(data.matches.map(match=>match.stage))];
+   const selector=document.createElement('select');
+   const label=document.createElement('label');
+   label.append('Ronda ',selector);
+   for(const round of rounds)selector.add(new Option(round,round));
+   const viewport=document.createElement('div');
+   viewport.className='picks-scroll';
+   viewport.tabIndex=0;
+   viewport.setAttribute('role','region');
+   viewport.setAttribute('aria-label','Tabla de pronósticos');
+   list.append(label,viewport);
+   selector.onchange=()=>{
+    const matches=data.matches.filter(match=>match.stage===selector.value);
+    const table=document.createElement('table');
+    table.className='picks-table';
+    const header=table.createTHead().insertRow();
+    function heading(row,text,scope){
+     const cell=document.createElement('th');
+     cell.scope=scope;
+     cell.textContent=text;
+     row.append(cell);
+     return cell;
+    }
+    heading(header,'Participante','col');
+    for(const match of matches){
+     const cell=heading(header,match.home+' vs. '+match.away,'col');
+     const official=document.createElement('small');
+     official.textContent='Oficial · '+(opts[match.result]||'Pendiente');
+     cell.append(official);
+    }
+    heading(header,'Aciertos','col');
+    const body=table.createTBody();
+    for(const player of data.players){
+     const picks=new Map(player.picks.map(pick=>[pick.id,pick.pick]));
+     const row=body.insertRow();
+     heading(row,player.name,'row');
+     let correct=0;
+     for(const match of matches){
+      const cell=row.insertCell();
+      const pick=picks.get(match.id);
+      cell.textContent=opts[pick]||'—';
+      if(pick&&pick===match.result){
+       correct++;
+       cell.className='picks-correct';
+       cell.textContent+=' ✓';
+      }
+     }
+     row.insertCell().textContent=matches.some(match=>match.result)?correct:'—';
+    }
+    if(!data.players.length){
+     const empty=body.insertRow().insertCell();
+     empty.colSpan=matches.length+2;
+     empty.textContent='Todavía no hay participantes registrados.';
+    }
+    viewport.replaceChildren(table);
+   };
+   selector.onchange();
   });
   byId('register').onsubmit=run(async e=>{
    byId('issued').textContent='';
@@ -173,16 +219,16 @@ const worker = {async fetch(request,env){
    if(!env.ADMIN_PASSWORD||typeof data.secret!=='string'||(await hash(data.secret))!==(await hash(env.ADMIN_PASSWORD)))return send({error:'Contraseña de administrador incorrecta.'},401);
   }
   if(path==='/api/participants'){
-   const players=await db.prepare(`
+   const [players,matches]=await db.batch([db.prepare(`
     SELECT p.name, COALESCE(
-     json_agg(json_build_object('stage',m.stage,'home',m.home,'away',m.away,'pick',k.pick)
+     json_agg(json_build_object('id',m.id,'pick',k.pick)
       ORDER BY m.cutoff,m.id) FILTER (WHERE k.match_id IS NOT NULL), '[]'::json
     ) AS picks
     FROM players p LEFT JOIN picks k ON k.player=p.id
     LEFT JOIN matches m ON m.id=k.match_id
     GROUP BY p.id ORDER BY lower(p.name),p.id
-   `).all();
-   return send({players:players.results});
+   `),db.prepare('SELECT id,stage,home,away,result FROM matches ORDER BY cutoff,id')]);
+   return send({players:players.results,matches:matches.results});
   }
   if(path==='/api/match'){
    const home=String(data.home||'').trim(),away=String(data.away||'').trim();
