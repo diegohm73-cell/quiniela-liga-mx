@@ -8,7 +8,7 @@ function page(admin) {
  return `<!doctype html><html lang="es"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Quiniela Liguilla MX</title><style>
  body{margin:0;background:#f1f5f2;color:#13251e;font:16px system-ui}header{background:#10392c;color:white;padding:24px}main,header div{max-width:760px;margin:auto}main{padding:16px}section{background:white;padding:18px;border-radius:14px;margin-bottom:14px}h1,h2{margin-top:0}label{display:block;margin:10px 0}input,select,button{font:inherit;padding:9px;border:1px solid #adbdb5;border-radius:7px;max-width:100%;box-sizing:border-box}button{background:#14553d;color:white;cursor:pointer;margin:5px 0}li{padding:6px 0}.match{border-top:1px solid #ccd8d1;padding:12px 0}p{line-height:1.45}#message{font-weight:bold}small{display:block}
  </style><header><div><h1>Quiniela Liguilla MX</h1>${admin?'Panel de administrador':'Pronósticos · Local, Empate o Visita'}</div></header><main>
- ${admin?`<section><h2>Administración</h2><label>Contraseña de administrador <input id="secret" type="password" autocomplete="current-password"></label><form id="register"><label>Nombre del participante <input name="name" minlength="2" maxlength="60" required></label><button>Generar código</button><output id="issued" aria-live="polite"></output></form></section><section><h2>Publicar partido</h2><form id="publish"><label>Etapa <select name="stage">${stages.map(s=>'<option>'+s+'</option>').join('')}</select></label><label>Local <input name="home" maxlength="65" required></label><label>Visitante <input name="away" maxlength="65" required></label><label>Fecha y hora del partido (Zacatecas) <input type="datetime-local" name="kickoff" required></label><button>Publicar partido</button></form></section>`:`<section><h2>Mi participación</h2><label>Código de participante <input id="code" autocomplete="off"></label><small>Usa el código que te dio el organizador. Puedes actualizar tu boleta hasta el cierre de la ronda.</small></section>`}
+ ${admin?`<section><h2>Administración</h2><label>Contraseña de administrador <input id="secret" type="password" autocomplete="current-password"></label><form id="register"><label>Nombre del participante <input name="name" minlength="2" maxlength="60" required></label><button>Generar código</button><output id="issued" aria-live="polite"></output></form></section><section><h2>Publicar partido</h2><form id="publish"><label>Etapa <select name="stage">${stages.map(s=>'<option>'+s+'</option>').join('')}</select></label><label>Local <input name="home" maxlength="65" required></label><label>Visitante <input name="away" maxlength="65" required></label><label>Fecha y hora del partido (Zacatecas) <input type="datetime-local" name="kickoff" required></label><button id="save-match">Publicar partido</button> <button type="button" id="cancel-edit" hidden>Cancelar edición</button></form></section><section><h2>Participantes y pronósticos</h2><button type="button" id="view-players">Consultar participantes</button><div id="players"></div></section>`:`<section><h2>Mi participación</h2><label>Código de participante <input id="code" autocomplete="off"></label><small>Usa el código que te dio el organizador. Puedes actualizar tu boleta hasta el cierre de la ronda.</small></section>`}
  <p id="message" role="status"></p><section><h2>Partidos y resultados</h2><div id="matches"></div></section><section><h2>Tabla general</h2><ol id="ranking"></ol></section></main>
  <script>
  const admin=${admin}, opts=${JSON.stringify(options)};
@@ -21,7 +21,40 @@ function page(admin) {
   return result;
  }
  function run(action){return async event=>{event.preventDefault();try{await action(event)}catch(error){report(error.message)}}}
+ let editingMatch=null;
+ const secret=()=>byId('secret').value;
+ function resetMatch(){
+  editingMatch=null;
+  byId('publish').reset();
+  byId('save-match').textContent='Publicar partido';
+  byId('cancel-edit').hidden=true;
+ }
  if(admin){
+  byId('cancel-edit').onclick=resetMatch;
+  byId('secret').oninput=()=>byId('players').replaceChildren();
+  byId('view-players').onclick=run(async ()=>{
+   const password=secret();
+   const data=await api('participants',{secret:password});
+   if(secret()!==password)return;
+   const list=byId('players');
+   list.replaceChildren();
+   if(!data.players.length)list.textContent='Todavía no hay participantes registrados.';
+   for(const player of data.players){
+    const details=document.createElement('details');
+    const summary=document.createElement('summary');
+    summary.textContent=player.name+' · '+player.picks.length+' pronósticos';
+    details.append(summary);
+    const entries=document.createElement('ul');
+    for(const pick of player.picks){
+     const item=document.createElement('li');
+     item.textContent=pick.stage+' · '+pick.home+' vs. '+pick.away+' · '+opts[pick.pick];
+     entries.append(item);
+    }
+    details.append(entries);
+    if(!player.picks.length)entries.textContent='Sin pronósticos enviados.';
+    list.append(details);
+   }
+  });
   byId('register').onsubmit=run(async e=>{
    byId('issued').textContent='';
    const player=await api('register',{...Object.fromEntries(new FormData(e.currentTarget)),secret:byId('secret').value});
@@ -30,7 +63,12 @@ function page(admin) {
   });
   byId('publish').onsubmit=run(async e=>{
    const fields=Object.fromEntries(new FormData(e.currentTarget));
-   await api('match',{...fields,secret:byId('secret').value});report('Partido publicado');await load();
+   const id=editingMatch;
+   await api('match',{...fields,id,secret:secret()});
+   resetMatch();
+   byId('players').replaceChildren();
+   report(id===null?'Partido publicado.':'Partido actualizado.');
+   await load();
   });
  }else{
   byId('code').value=localStorage.getItem('quiniela-code')||'';
@@ -87,7 +125,23 @@ function page(admin) {
    if(!admin){
     const round=rounds.get(match.stage);
     round.insertBefore(form,round.querySelector('button'));
-   }else byId('matches').append(form);
+   }else{
+    const edit=document.createElement('button');
+    edit.type='button';
+    edit.textContent='Editar partido';
+    edit.onclick=()=>{
+     editingMatch=match.id;
+     const publish=byId('publish');
+     for(const field of ['stage','home','away'])publish.elements[field].value=match[field];
+     publish.elements.kickoff.value=new Date(match.cutoff+600000-21600000).toISOString().slice(0,16);
+     byId('save-match').textContent='Guardar cambios';
+     byId('cancel-edit').hidden=false;
+     publish.elements.home.focus();
+     publish.scrollIntoView({block:'center'});
+    };
+    form.append(' ',edit);
+    byId('matches').append(form);
+   }
   }
   byId('ranking').replaceChildren(...data.ranking.map(p=>{const li=document.createElement('li');li.textContent=p.name+' · '+p.points+' pts';return li}));
  }
@@ -108,20 +162,45 @@ const worker = {async fetch(request,env){
    ]);
    return send({matches:matches.results,ranking:ranking.results});
   }
-  if(request.method!=='POST'||!['/api/match','/api/result','/api/register','/api/pick'].includes(path))return send({error:'Ruta inexistente.'},404);
+  if(request.method!=='POST'||!['/api/match','/api/result','/api/register','/api/participants','/api/pick'].includes(path))return send({error:'Ruta inexistente.'},404);
   if(Number(request.headers.get('content-length'))>4096)return send({error:'Solicitud demasiado grande.'},413);
   const raw=await request.text();
   if(raw.length>4096)return send({error:'Solicitud demasiado grande.'},413);
   let data;
   try{data=JSON.parse(raw)}catch{return send({error:'Solicitud inválida.'},400)}
   if(!data||typeof data!=='object')return send({error:'Solicitud inválida.'},400);
-  if(path==='/api/match'||path==='/api/result'||path==='/api/register'){
+  if(path==='/api/match'||path==='/api/result'||path==='/api/register'||path==='/api/participants'){
    if(!env.ADMIN_PASSWORD||typeof data.secret!=='string'||(await hash(data.secret))!==(await hash(env.ADMIN_PASSWORD)))return send({error:'Contraseña de administrador incorrecta.'},401);
+  }
+  if(path==='/api/participants'){
+   const players=await db.prepare(`
+    SELECT p.name, COALESCE(
+     json_agg(json_build_object('stage',m.stage,'home',m.home,'away',m.away,'pick',k.pick)
+      ORDER BY m.cutoff,m.id) FILTER (WHERE k.match_id IS NOT NULL), '[]'::json
+    ) AS picks
+    FROM players p LEFT JOIN picks k ON k.player=p.id
+    LEFT JOIN matches m ON m.id=k.match_id
+    GROUP BY p.id ORDER BY lower(p.name),p.id
+   `).all();
+   return send({players:players.results});
   }
   if(path==='/api/match'){
    const home=String(data.home||'').trim(),away=String(data.away||'').trim();
    const kickoff=typeof data.kickoff==='string'&&/^\d{4}-\d\d-\d\dT\d\d:\d\d$/.test(data.kickoff)?Date.parse(data.kickoff+'-06:00'):NaN;
    if(!home||!away||home.toLowerCase()===away.toLowerCase()||home.length>65||away.length>65||!stages.includes(data.stage)||!Number.isFinite(kickoff))return send({error:'Revisa etapa, equipos y horario.'},400);
+   if(data.id!=null){
+    if(!Number.isSafeInteger(data.id)||data.id<=0)return send({error:'Partido inválido.'},400);
+    const updated=await db.prepare(`
+     UPDATE matches m SET stage=?,home=?,away=?,cutoff=?
+     WHERE m.id=? AND (
+      (m.stage=? AND lower(m.home)=lower(?) AND lower(m.away)=lower(?))
+      OR (m.result IS NULL AND NOT EXISTS (SELECT 1 FROM picks WHERE match_id=m.id))
+     )
+    `).bind(data.stage,home,away,kickoff-600000,data.id,data.stage,home,away).run();
+    return updated.meta.changes?send({ok:true}):send({
+     error:'El partido no existe o ya tiene pronósticos o resultado. En ese caso solo puedes corregir mayúsculas o editar el horario.'
+    },409);
+   }
    await db.prepare('INSERT INTO matches(stage,home,away,cutoff) VALUES (?,?,?,?)').bind(data.stage,home,away,kickoff-600000).run();
    return send({ok:true});
   }
