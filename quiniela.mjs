@@ -15,6 +15,7 @@ function page(admin) {
  const admin=${admin}, opts=${JSON.stringify(options)};
  const byId=id=>document.getElementById(id);
  const report=text=>byId('message').textContent=text;
+ function rememberCode(code){try{localStorage.setItem('quiniela-code',code)}catch{}}
  async function api(path,data){
   const response=await fetch('/api/'+path,data?{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(data)}:{cache:'no-store'});
   const result=await response.json();
@@ -117,7 +118,37 @@ function page(admin) {
    await load();
   });
  }else{
-  byId('code').value=localStorage.getItem('quiniela-code')||'';
+  try{byId('code').value=localStorage.getItem('quiniela-code')||''}catch{}
+  byId('code').oninput=()=>{
+   for(const label of document.querySelectorAll('[data-match-id]')){
+    if(label.textContent&&label.parentElement.querySelector('select')){
+     const select=label.parentElement.querySelector('select');
+     if(select.value===label.dataset.savedPick)select.value='';
+    }
+    label.textContent='';
+   }
+  };
+  byId('code').onchange=()=>restorePicks();
+ }
+ let picksRevision=0;
+ async function restorePicks(){
+  const revision=++picksRevision;
+  const code=byId('code').value.trim();
+  try{
+   const saved=code?await api('my-picks',{code}):{picks:[]};
+   if(revision!==picksRevision||code!==byId('code').value.trim())return;
+   if(code)rememberCode(code);
+   const picks=new Map(saved.picks.map(row=>[String(row.match_id),row.pick]));
+   for(const label of document.querySelectorAll('[data-match-id]')){
+    const pick=picks.get(label.dataset.matchId);
+    label.dataset.savedPick=pick||'';
+    label.textContent=pick?'Tu pronóstico guardado: '+opts[pick]:'';
+    const select=label.parentElement.querySelector('select');
+    if(pick&&select&&select.value==='')select.value=pick;
+   }
+  }catch(error){
+   if(revision===picksRevision)report(error.message);
+  }
  }
  async function load(){
   const data=await api('state');
@@ -137,10 +168,22 @@ function page(admin) {
      form.onsubmit=run(async ()=>{
       const code=byId('code').value.trim();
       const picks=Object.fromEntries(new FormData(form));
-      await api('pick',{stage:match.stage,picks,code});
-      localStorage.setItem('quiniela-code',code);report('Boleta guardada para '+match.stage+'.');
+      button.disabled=true;
+      status.textContent='Guardando boleta…';
+      try{
+       await api('pick',{stage:match.stage,picks,code});
+       status.textContent='Boleta guardada para '+match.stage+'.';
+       if(code===byId('code').value.trim()){
+        rememberCode(code);
+        await restorePicks();
+       }
+      }catch(error){
+       status.textContent=error.message;
+      }finally{button.disabled=false;}
      });
-     form.append(button);
+     const status=document.createElement('p');
+     status.setAttribute('role','status');
+     form.append(button,status);
     }
    }
   }
@@ -169,6 +212,9 @@ function page(admin) {
     }
    }
    if(!admin){
+    const saved=document.createElement('small');
+    saved.dataset.matchId=String(match.id);
+    form.append(saved);
     const round=rounds.get(match.stage);
     round.insertBefore(form,round.querySelector('button'));
    }else{
@@ -185,10 +231,25 @@ function page(admin) {
      publish.elements.home.focus();
      publish.scrollIntoView({block:'center'});
     };
-    form.append(' ',edit);
+    const remove=document.createElement('button');
+    remove.type='button';
+    remove.textContent='Eliminar partido';
+    remove.onclick=run(async ()=>{
+     if(!confirm('¿Eliminar '+match.home+' vs. '+match.away+'? También se eliminarán sus pronósticos y su resultado.'))return;
+     remove.disabled=true;
+     try{
+      await api('delete-match',{id:match.id,secret:secret()});
+      if(editingMatch===match.id)resetMatch();
+      byId('players').replaceChildren();
+      report('Partido eliminado.');
+      await load();
+     }finally{remove.disabled=false;}
+    });
+    form.append(' ',edit,' ',remove);
     byId('matches').append(form);
    }
   }
+  if(!admin)await restorePicks();
   byId('ranking').replaceChildren(...data.ranking.map(p=>{const li=document.createElement('li');li.textContent=p.name+' · '+p.points+' pts';return li}));
  }
  load().catch(error=>report(error.message));
@@ -208,15 +269,23 @@ const worker = {async fetch(request,env){
    ]);
    return send({matches:matches.results,ranking:ranking.results});
   }
-  if(request.method!=='POST'||!['/api/match','/api/result','/api/register','/api/participants','/api/pick'].includes(path))return send({error:'Ruta inexistente.'},404);
+  if(request.method!=='POST'||!['/api/match','/api/result','/api/register','/api/participants','/api/pick','/api/my-picks','/api/delete-match'].includes(path))return send({error:'Ruta inexistente.'},404);
   if(Number(request.headers.get('content-length'))>4096)return send({error:'Solicitud demasiado grande.'},413);
   const raw=await request.text();
   if(raw.length>4096)return send({error:'Solicitud demasiado grande.'},413);
   let data;
   try{data=JSON.parse(raw)}catch{return send({error:'Solicitud inválida.'},400)}
   if(!data||typeof data!=='object')return send({error:'Solicitud inválida.'},400);
-  if(path==='/api/match'||path==='/api/result'||path==='/api/register'||path==='/api/participants'){
+  if(path==='/api/match'||path==='/api/result'||path==='/api/register'||path==='/api/participants'||path==='/api/delete-match'){
    if(!env.ADMIN_PASSWORD||typeof data.secret!=='string'||(await hash(data.secret))!==(await hash(env.ADMIN_PASSWORD)))return send({error:'Contraseña de administrador incorrecta.'},401);
+  }
+  if(path==='/api/delete-match'){
+   if(!Number.isSafeInteger(data.id)||data.id<=0)return send({error:'Partido inválido.'},400);
+   const deleted=await db.prepare(`
+    WITH removed_picks AS (DELETE FROM picks WHERE match_id=?)
+    DELETE FROM matches WHERE id=?
+   `).bind(data.id,data.id).run();
+   return deleted.meta.changes?send({ok:true}):send({error:'Partido inexistente.'},404);
   }
   if(path==='/api/participants'){
    const [players,matches]=await db.batch([db.prepare(`
@@ -264,11 +333,17 @@ const worker = {async fetch(request,env){
    if(!created.meta.changes)return send({error:'Ya existe un participante con ese nombre. Usa su código original o distingue los nombres completos.'},409);
    return send({name,code});
   }
-  if(!stages.includes(data.stage)||!data.picks||typeof data.picks!=='object'||Array.isArray(data.picks)||typeof data.code!=='string'||!/^[0-9a-f]{32}$/i.test(data.code))return send({error:'Revisa tu código y tus pronósticos.'},400);
+  const code=typeof data.code==='string'?data.code.trim().toUpperCase():'';
+  if(!/^[0-9A-F]{32}$/.test(code))return send({error:'Escribe el código de participante que te dio el organizador.'},400);
+  const player=await db.prepare('SELECT id FROM players WHERE token=?').bind(await hash(code)).first();
+  if(!player)return send({error:'Código incorrecto.'},401);
+  if(path==='/api/my-picks'){
+   const picks=await db.prepare('SELECT match_id,pick FROM picks WHERE player=?').bind(player.id).all();
+   return send({picks:picks.results});
+  }
+  if(!stages.includes(data.stage)||!data.picks||typeof data.picks!=='object'||Array.isArray(data.picks))return send({error:'Revisa tus pronósticos.'},400);
   const picks=Object.entries(data.picks);
   if(!picks.length||picks.some(([id,pick])=>!/^\d+$/.test(id)||!valid(pick)))return send({error:'Completa todos los pronósticos de la ronda.'},400);
-  const player=await db.prepare('SELECT id FROM players WHERE token=?').bind(await hash(data.code.toUpperCase())).first();
-  if(!player)return send({error:'Código incorrecto.'},401);
   const result=await db.prepare(`
    WITH round_matches AS (SELECT id,cutoff,result FROM matches WHERE stage=?),
    submitted AS (SELECT key::integer AS id,value AS pick FROM jsonb_each_text(?::jsonb))
